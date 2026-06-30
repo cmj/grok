@@ -88,6 +88,98 @@ def load_conv(name: str) -> dict:
 def save_conv(name: str, data: dict):
     conv_path(name).write_text(json.dumps(data, indent=2))
 
+def append_turn(name: str, query: str, reply: str):
+    state = load_conv(name)
+    if not state:
+        return
+    turns = state.setdefault("turns", [])
+    turns.append({
+        "ts":     int(time.time()),
+        "query":  query,
+        "reply":  reply,
+    })
+    save_conv(name, state)
+
+def archive_current(state: dict) -> dict:
+    """
+    Move the currently-active conversation (id/created/turns) of a slot's
+    state into its archive list. Returns the updated state. No-op if there's
+    no active id yet (fresh/empty slot).
+    """
+    if not state.get("id"):
+        return state
+    archive = state.setdefault("archive", [])
+    archive.append({
+        "id":      state["id"],
+        "created": state.get("created", 0),
+        "retired": int(time.time()),
+        "turns":   state.get("turns", []),
+    })
+    return state
+
+def find_conv_id(target_id: str):
+    """
+    Search all slots for target_id, whether it's the currently active id or
+    sitting in a slot's archive. Returns (slot_name, location, entry) where
+    location is 'active' or 'archive', or (None, None, None) if not found.
+    """
+    CONVS_DIR.mkdir(parents=True, exist_ok=True)
+    for p in sorted(CONVS_DIR.glob("*.json")):
+        try:
+            state = json.loads(p.read_text())
+        except Exception:
+            continue
+        if state.get("id") == target_id:
+            return p.stem, "active", state
+        for entry in state.get("archive", []):
+            if entry.get("id") == target_id:
+                return p.stem, "archive", entry
+    return None, None, None
+
+def use_conv_id(conv_name: str, target_id: str):
+    """
+    Make target_id the active conversation on conv_name, archiving whatever
+    was previously active on that slot. target_id can currently be active
+    elsewhere (still works, just adopts it) or sitting in any slot's archive.
+    """
+    src_slot, location, entry = find_conv_id(target_id)
+    if src_slot is None:
+        print(f"No conversation found with id: {target_id}", file=sys.stderr)
+        sys.exit(1)
+
+    picked = {
+        "id":      entry["id"],
+        "created": entry.get("created", 0),
+        "turns":   entry.get("turns", []),
+    }
+
+    if location == "archive":
+        src_state = load_conv(src_slot)
+        src_state["archive"] = [
+            e for e in src_state.get("archive", []) if e.get("id") != target_id
+        ]
+        save_conv(src_slot, src_state)
+
+    if location == "active" and src_slot != conv_name:
+        src_state = load_conv(src_slot)
+        src_state.pop("id", None)
+        src_state.pop("created", None)
+        src_state["turns"] = []
+        save_conv(src_slot, src_state)
+
+    dest_state = load_conv(conv_name)
+    if not dest_state:
+        dest_state = {"name": conv_name}
+    dest_state = archive_current(dest_state)
+    dest_state["id"]        = picked["id"]
+    dest_state["created"]   = picked["created"]
+    dest_state["last_used"] = int(time.time())
+    dest_state["turns"]     = picked["turns"]
+    save_conv(conv_name, dest_state)
+
+    print(f"[switched {conv_name} -> {picked['id']} "
+          f"(from {src_slot}'s {location})]", file=sys.stderr)
+
 def list_convs():
     CONVS_DIR.mkdir(parents=True, exist_ok=True)
     convs = sorted(CONVS_DIR.glob("*.json"))
@@ -102,6 +194,56 @@ def list_convs():
             print(f"{p.stem:<20} {d.get('id','?'):<25} {ts}")
         except Exception:
             print(f"{p.stem:<20} (unreadable)")
+
+def clip(text: str, n_words: int = 10) -> str:
+    text = " ".join(text.split())  # collapse whitespace/newlines
+    words = text.split(" ")
+    out = " ".join(words[:n_words])
+    if len(words) > n_words:
+        out += "..."
+    return out
+
+def show_history(conv_name: str = None):
+    CONVS_DIR.mkdir(parents=True, exist_ok=True)
+    convs = sorted(CONVS_DIR.glob("*.json"))
+    if not convs:
+        print("No conversation slots found.")
+        return
+
+    if conv_name:
+        convs = [p for p in convs if p.stem == conv_name]
+        if not convs:
+            print(f"No such conversation slot: {conv_name}")
+            return
+
+    def print_turns(turns):
+        if not turns:
+            print("  (no recorded turns)")
+            return
+        for t in turns:
+            ts = time.strftime("%Y-%m-%d %H:%M", time.localtime(t.get("ts", 0)))
+            q  = clip(t.get("query", ""))
+            print(f"  [{ts}] {q}")
+
+    for p in convs:
+        try:
+            d = json.loads(p.read_text())
+        except Exception:
+            print(f"{p.stem}: (unreadable)")
+            continue
+
+        print(f"=== {p.stem}  [active: {d.get('id', '(none)')}] ===")
+        print_turns(d.get("turns", []))
+
+        archive = d.get("archive", [])
+        if archive:
+            for entry in reversed(archive):  # most recently retired first
+                retired_ts = time.strftime(
+                    "%Y-%m-%d %H:%M", time.localtime(entry.get("retired", 0))
+                )
+                print(f"  --- archived [{entry.get('id', '?')}] (retired {retired_ts}) ---")
+                print_turns(entry.get("turns", []))
+        print()
 
 def make_headers(auth_token: str, csrf_token: str) -> dict:
     return {
@@ -123,12 +265,18 @@ def new_conversation(headers: dict, conv_name: str) -> str:
     raw = http_post(CREATE_CONV_URL, headers, payload)
     data = json.loads(raw)
     conv_id = data["data"]["create_grok_conversation"]["conversation_id"]
-    save_conv(conv_name, {
-        "id":         conv_id,
-        "created":    int(time.time()),
-        "last_used":  int(time.time()),
-        "name":       conv_name,
-    })
+
+    state = load_conv(conv_name)
+    if not state:
+        state = {"name": conv_name}
+    state = archive_current(state)  # preserve old id/turns before overwrite
+
+    state["id"]        = conv_id
+    state["created"]   = int(time.time())
+    state["last_used"] = int(time.time())
+    state["name"]       = conv_name
+    state["turns"]      = []
+    save_conv(conv_name, state)
     return conv_id
 
 def get_or_create_conv(headers: dict, conv_name: str, force_new: bool) -> str:
@@ -282,6 +430,13 @@ def main():
                     help="Start a new conversation on this slot")
     ap.add_argument("--list",     action="store_true",
                     help="List all conversation slots")
+    ap.add_argument("--history",  nargs="?", const=True, default=False, metavar="NAME",
+                    help="Show query history per slot (clipped), including "
+                         "archived conversation ids. Optionally pass a slot name.")
+    ap.add_argument("--use-id",   default=None, metavar="CONV_ID",
+                    help="Reactivate a past conversation id (active or archived, "
+                         "from any slot) as the current conversation on --conv. "
+                         "The slot's previously-active conversation is archived, never lost.")
     ap.add_argument("--short",    action="store_true", default=cfg_bool(cfg, "short", False),
                     help="Request short answer; output as plain text")
     ap.add_argument("--md",       action="store_true", default=cfg_bool(cfg, "force_md", False),
@@ -303,6 +458,15 @@ def main():
 
     if args.list:
         list_convs()
+        return
+
+    if args.history:
+        name = args.history if isinstance(args.history, str) else None
+        show_history(name)
+        return
+
+    if args.use_id:
+        use_conv_id(args.conv, args.use_id)
         return
 
     auth_token  = cfg.get("auth_token", "")
@@ -384,6 +548,7 @@ def main():
     if args.short and not args.md:
         plain = to_plain(message)
         print(plain)
+        append_turn(args.conv, query_text, plain)
         if args.rentry:
             try:
                 rentry_publish(plain)
@@ -392,6 +557,7 @@ def main():
     else:
         md = clean_markdown(message)
         print(md)
+        append_turn(args.conv, query_text, md)
         if args.rentry:
             try:
                 rentry_publish(md)
