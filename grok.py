@@ -444,6 +444,9 @@ def main():
     ap.add_argument("--save",     action="store_true",
                     default=cfg_bool(cfg, "auto_save", False),
                     help=f"Save raw NDJSON .json to {LOGS_DIR}")
+    ap.add_argument("-q", "--quiet", action="store_true",
+                    default=cfg_bool(cfg, "quiet", False),
+                    help="Suppress '[saved: ...]' and other stderr status messages")
     ap.add_argument("--model",    default=cfg.get("model", "grok-3"), metavar="MODEL",
                     help="Model to use (default: grok-3, or model in config)")
     ap.add_argument("--search",   action="store_true", default=cfg_bool(cfg, "search", False),
@@ -538,7 +541,8 @@ def main():
         LOGS_DIR.mkdir(parents=True, exist_ok=True)
         out_file = LOGS_DIR / f"{int(time.time())}.json"
         out_file.write_text(ndjson_text)
-        print(f"[saved: {out_file}]", file=sys.stderr)
+        if not args.quiet:
+            print(f"[saved: {out_file}]", file=sys.stderr)
 
     message = extract_message(ndjson_text)
     if not message:

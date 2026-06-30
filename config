@@ -13,12 +13,15 @@ x_csrf_token=
 default_conv=main
 
 # Default Grok model id. Overridden by --model MODEL.
-# grok-3/grok-4 ?
+# grok-3/grok-4 (may not work?)
 #model=grok-4
 
 # Always request "short answer only." and print plain text (no Markdown).
 # Equivalent to always passing --short. true/false (also: 1/0, yes/no, on/off)
 short=false
+
+# Quiet - Suppress '[saved: ...]' and other stderr status messages.
+quiet=false
 
 # When short=true above, force Markdown output anyway instead of plain text.
 # Equivalent to always passing --md alongside --short.
