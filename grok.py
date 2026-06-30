@@ -10,14 +10,13 @@ Usage:
   grok.py --new              use alone to reset; start fresh conversation on current slot
   grok.py --list             list all named conversation slots
   grok.py --conv NAME        use/create named conversation slot (default: main)
-  grok.py --short            short answer only (plain text, no Markdown)
+  grok.py --short            short answer only (plain text, no Markdown, faster response)
   grok.py --md               always emit Markdown even in --short mode
-  grok.py --save [DIR]       save raw NDJSON .out to DIR (default: ~/.config/grok/logs/)
-  grok.py --model MODEL      override model (default: grok-3)
+  grok.py --save             save raw NDJSON .json to LOGS_DIR (default "~/.local/state/grok/logs")
+  grok.py --model MODEL      override model (default: grok-4 (may not work)) 
   grok.py --search           enable web search results
   grok.py --citations        enable citations in response
-  grok.py --rentry           upload Markdown to rentry.co (random url, one-off)
-                              url and edit code are printed, not stored/reused
+  grok.py --rentry           upload Markdown to rentry.co (url and edit code are printed, not stored/reused)
 """
 
 import argparse
@@ -48,7 +47,8 @@ USER_AGENT = (
 CONFIG_DIR  = Path("~/.config/grok").expanduser()
 CONFIG_FILE = CONFIG_DIR / "config"
 CONVS_DIR   = CONFIG_DIR / "convs"
-LOGS_DIR    = "~/.local/state/grok/logs"
+#LOGS_DIR    = CONFIG_DIR / "logs"
+LOGS_DIR    = Path("~/.local/state/grok/logs").expanduser()
 
 RENTRY_BASE = "https://rentry.co"
 
@@ -196,11 +196,10 @@ class RentryClient:
         }
         return self._post(f"{RENTRY_BASE}/api/new", payload, csrftoken)
 
-
 def rentry_publish(text: str) -> str:
     """
     Create a new rentry.co paste (random url). Prints the url and edit code
-    for the user's own reference - the tool does not track or reuse them.
+    for the user's own reference, the tool does not track or reuse them.
     """
     client = RentryClient()
 
@@ -287,10 +286,9 @@ def main():
                     help="Request short answer; output as plain text")
     ap.add_argument("--md",       action="store_true", default=cfg_bool(cfg, "force_md", False),
                     help="Force Markdown output even with --short")
-    ap.add_argument("--save",     nargs="?", const=str(LOGS_DIR),
-                    default=(str(LOGS_DIR) if cfg_bool(cfg, "auto_save", False) else None),
-                    metavar="DIR",
-                    help="Save raw NDJSON .out to DIR")
+    ap.add_argument("--save",     action="store_true",
+                    default=cfg_bool(cfg, "auto_save", False),
+                    help=f"Save raw NDJSON .json to {LOGS_DIR}")
     ap.add_argument("--model",    default=cfg.get("model", "grok-3"), metavar="MODEL",
                     help="Model to use (default: grok-3, or model in config)")
     ap.add_argument("--search",   action="store_true", default=cfg_bool(cfg, "search", False),
@@ -372,10 +370,9 @@ def main():
 
     ndjson_text = raw_bytes.decode("utf-8", errors="replace")
 
-    if args.save is not None:
-        save_dir = Path(args.save).expanduser()
-        save_dir.mkdir(parents=True, exist_ok=True)
-        out_file = save_dir / f"{int(time.time())}.out"
+    if args.save:
+        LOGS_DIR.mkdir(parents=True, exist_ok=True)
+        out_file = LOGS_DIR / f"{int(time.time())}.json"
         out_file.write_text(ndjson_text)
         print(f"[saved: {out_file}]", file=sys.stderr)
 
