@@ -1,0 +1,45 @@
+# ~/.config/grok/config
+# Auth token and CSRF token from your logged-in x.com session cookies.
+# In browser devtools: Application/Storage > Cookies > x.com
+#   auth_token   > cookie named "auth_token"
+#   x_csrf_token > cookie named "ct0"
+# Can also be supplied via AUTH_TOKEN / X_CSRF_TOKEN environment variables,
+# which take precedence over this file.
+auth_token=
+x_csrf_token=
+
+# Default conversation slot used when --conv NAME is not passed.
+# Slots are stored as ~/.config/grok/convs/NAME.json
+default_conv=main
+
+# Default Grok model id. Overridden by --model MODEL.
+# grok-3/grok-4 ?
+#model=grok-4
+
+# Always request "short answer only." and print plain text (no Markdown).
+# Equivalent to always passing --short. true/false (also: 1/0, yes/no, on/off)
+short=false
+
+# When short=true above, force Markdown output anyway instead of plain text.
+# Equivalent to always passing --md alongside --short.
+force_md=false
+
+# Request web search results to be included in responses.
+# Equivalent to always passing --search.
+search=false
+
+# Request citations to be included in responses.
+# Equivalent to always passing --citations.
+citations=false
+
+# Automatically save raw NDJSON .out responses to ~/.config/grok/logs/
+# without needing to pass --save each time. Equivalent to always passing
+# --save (using the default log directory).
+auto_save=false
+
+# Automatically upload every response to rentry.co (random slug) without
+# needing to pass --rentry each time. Equivalent to always passing --rentry
+# with no slug. Edit codes are still saved per-conversation-slot and printed.
+# Most people will want this off and will pass --rentry / --rentry SLUG
+# explicitly when they actually want to publish.
+auto_rentry=false
