@@ -16,8 +16,8 @@ Usage:
   grok.py --model MODEL      override model (default: grok-3)
   grok.py --search           enable web search results
   grok.py --citations        enable citations in response
-  grok.py --rentry [SLUG]    upload Markdown to rentry.co (optional custom slug)
-                             edit code is saved to conv slot and printed
+  grok.py --rentry           upload Markdown to rentry.co (random url, one-off)
+                              url and edit code are printed, not stored/reused
 """
 
 import argparse
@@ -94,14 +94,12 @@ def list_convs():
     if not convs:
         print("No conversation slots found.")
         return
-    print(f"{'SLOT':<20} {'CONVERSATION ID':<25} {'LAST USED':<17} RENTRY")
+    print(f"{'SLOT':<20} {'CONVERSATION ID':<25} LAST USED")
     for p in convs:
         try:
             d = json.loads(p.read_text())
             ts = time.strftime("%Y-%m-%d %H:%M", time.localtime(d.get("last_used", 0)))
-            rentry_url = d.get("rentry", {}).get("url", "")
-            rentry_disp = f"rentry.co/{rentry_url}" if rentry_url else "-"
-            print(f"{p.stem:<20} {d.get('id','?'):<25} {ts:<17} {rentry_disp}")
+            print(f"{p.stem:<20} {d.get('id','?'):<25} {ts}")
         except Exception:
             print(f"{p.stem:<20} (unreadable)")
 
@@ -157,87 +155,68 @@ class RentryClient:
         req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
         return self.opener.open(req, timeout=30)
 
-    def _post(self, url: str, data: dict) -> dict:
+    def _post(self, url: str, data: dict, csrftoken: str) -> dict:
         body = urllib.parse.urlencode(data).encode()
         req = urllib.request.Request(
             url,
             data=body,
             headers={
                 "User-Agent": USER_AGENT,
-                "Referer": RENTRY_BASE,
+                "Referer": RENTRY_BASE + "/",
+                "Origin": RENTRY_BASE,
                 "Content-Type": "application/x-www-form-urlencoded",
+                "X-CSRFToken": csrftoken,
             },
             method="POST",
         )
         with self.opener.open(req, timeout=30) as resp:
-            return json.loads(resp.read().decode())
+            raw = resp.read().decode()
+        try:
+            return json.loads(raw)
+        except json.JSONDecodeError:
+            raise RuntimeError(f"non-JSON response from rentry.co: {raw[:300]!r}")
 
     def _csrf_token(self) -> str:
-        resp = self._get(RENTRY_BASE)
+        resp = self._get(RENTRY_BASE + "/")
         resp.read()  # ensure Set-Cookie processed
         for cookie in self.cookie_jar:
             if cookie.name == "csrftoken":
                 return cookie.value
         raise RuntimeError("Could not obtain rentry.co csrf token")
 
-    def new(self, text: str, url: str = "", edit_code: str = "") -> dict:
+    def new(self, text: str, edit_code: str = "") -> dict:
+        if not text or not text.strip():
+            raise RuntimeError("refusing to publish empty text")
         csrftoken = self._csrf_token()
         payload = {
             "csrfmiddlewaretoken": csrftoken,
-            "url": url,
+            "url": "",
             "edit_code": edit_code,
             "text": text,
         }
-        return self._post(f"{RENTRY_BASE}/api/new", payload)
-
-    def edit(self, url: str, edit_code: str, text: str) -> dict:
-        csrftoken = self._csrf_token()
-        payload = {
-            "csrfmiddlewaretoken": csrftoken,
-            "edit_code": edit_code,
-            "text": text,
-        }
-        return self._post(f"{RENTRY_BASE}/api/edit/{url}", payload)
+        return self._post(f"{RENTRY_BASE}/api/new", payload, csrftoken)
 
 
-def rentry_publish(text: str, conv_name: str, slug: str = "") -> str:
+def rentry_publish(text: str) -> str:
     """
-    Publish (or update) a rentry.co paste for this conversation slot.
-    Returns the page URL. Edit code is persisted in the conv state and printed.
+    Create a new rentry.co paste (random url). Prints the url and edit code
+    for the user's own reference - the tool does not track or reuse them.
     """
     client = RentryClient()
-    state = load_conv(conv_name)
-    rentry_state = state.get("rentry", {})
 
-    existing_url   = rentry_state.get("url", "")
-    existing_code  = rentry_state.get("edit_code", "")
-
-    # If this slot already has a rentry page and no different slug was requested,
-    # update the existing entry instead of creating a new one.
-    if existing_url and (not slug or slug == existing_url):
-        resp = client.edit(existing_url, existing_code, text)
-        if resp.get("status") != "200":
-            print(f"[rentry edit failed: {resp.get('content')}] - creating new entry instead", file=sys.stderr)
-        else:
-            print(f"rentry: https://rentry.co/{existing_url}  (updated)")
-            print(f"edit code: {existing_code}")
-            return f"https://rentry.co/{existing_url}"
-
-    # create new entry
-    resp = client.new(text, url=slug)
+    resp = client.new(text)
     if resp.get("status") != "200":
-        errors = resp.get("content", "unknown error")
-        raise RuntimeError(f"rentry.co error: {errors}")
+        content = resp.get("content")
+        detail = content
+        if isinstance(content, dict) and content.get("errors"):
+            detail = content["errors"]
+        raise RuntimeError(f"rentry.co error: {detail}  (full response: {resp})")
 
     page_url  = resp["url"]
     edit_code = resp["edit_code"]
 
-    state["rentry"] = {
-        "url":       page_url,
-        "edit_code": edit_code,
-        "created":   int(time.time()),
-    }
-    save_conv(conv_name, state)
+    page_url = page_url.rstrip("/").rsplit("/", 1)[-1]
+    page_url = page_url.replace("https:", "").replace("http:", "").strip("/")
 
     full_url = f"https://rentry.co/{page_url}"
     print(f"rentry: {full_url}")
@@ -318,11 +297,10 @@ def main():
                     help="Enable web search results")
     ap.add_argument("--citations",action="store_true", default=cfg_bool(cfg, "citations", False),
                     help="Enable citations")
-    ap.add_argument("--rentry",   nargs="?", const="",
-                    default=("" if cfg_bool(cfg, "auto_rentry", False) else None),
-                    metavar="SLUG",
-                    help="Upload response Markdown to rentry.co (optional custom slug); "
-                         "edit code saved to this conversation slot and printed")
+    ap.add_argument("--rentry",   action="store_true",
+                    default=cfg_bool(cfg, "auto_rentry", False),
+                    help="Upload response Markdown to rentry.co as a fresh paste "
+                         "(random url, not stored or reused); url and edit code are printed")
     args = ap.parse_args()
 
     if args.list:
@@ -409,17 +387,17 @@ def main():
     if args.short and not args.md:
         plain = to_plain(message)
         print(plain)
-        if args.rentry is not None:
+        if args.rentry:
             try:
-                rentry_publish(plain, args.conv, args.rentry)
+                rentry_publish(plain)
             except Exception as e:
                 print(f"[rentry upload failed: {e}]", file=sys.stderr)
     else:
         md = clean_markdown(message)
         print(md)
-        if args.rentry is not None:
+        if args.rentry:
             try:
-                rentry_publish(md, args.conv, args.rentry)
+                rentry_publish(md)
             except Exception as e:
                 print(f"[rentry upload failed: {e}]", file=sys.stderr)
 
